@@ -6,6 +6,7 @@ import { defaultModelForHarness, modelProviderAvailabilityFor } from "./model/pi
 import { effectiveEgressEnforcement } from "./sandbox/sandbox.ts";
 import { slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
 import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
+import { buzzPluginConfigFromEnv, startBuzzPlugin } from "./buzz/index.ts";
 
 const config = loadConfig();
 
@@ -131,12 +132,32 @@ const slackRuntime = createSlackRuntimeReconciler({
 });
 slackRuntime.start();
 
+const buzzConfig = buzzPluginConfigFromEnv(process.env);
+const buzzRuntime = createSlackRuntimeReconciler({
+  load: async () => {
+    const cfg = buzzPluginConfigFromEnv(process.env);
+    if (!cfg) return null;
+    // version from relay + bot key fingerprint so env edits hot-reload
+    const version = `${cfg.relayUrl}|${cfg.channelIds.join(",")}|${cfg.botName}`;
+    return { version, config: cfg };
+  },
+  startPlugin: (desired) => startBuzzPlugin(desired, built.buzzCore),
+  onError: (error) => console.error(`[qm] buzz plugin reconciliation failed: ${errMessage(error)}`),
+});
+if (buzzConfig) {
+  console.log("[qm] Buzz surface enabled (BUZZ_RELAY_URL + BUZZ_BOT_PRIVATE_KEY)");
+  buzzRuntime.start();
+} else if (process.env.BUZZ_RELAY_URL || process.env.BUZZ_BOT_PRIVATE_KEY) {
+  console.warn("[qm] Buzz surface partial env — need both BUZZ_RELAY_URL and BUZZ_BOT_PRIVATE_KEY");
+}
+
 let shuttingDown = false;
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[qm] ${signal} received, shutting down`);
   void slackRuntime.stop().catch((e: unknown) => console.error("[qm] slack plugin stop failed:", errMessage(e)));
+  void buzzRuntime.stop().catch((e: unknown) => console.error("[qm] buzz plugin stop failed:", errMessage(e)));
   built.scheduler.stop();
   built.deploymentLayerRefresh.stop();
   server.close();

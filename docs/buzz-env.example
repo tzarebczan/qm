@@ -1,0 +1,31 @@
+# Buzz surface env (copy into lab core compose / .env — never commit real keys)
+
+# Required
+BUZZ_RELAY_URL=wss://my-brain.communities.buzz.xyz
+BUZZ_BOT_PRIVATE_KEY=nsec1...   # or 64-char hex; bot identity on the relay
+
+# Channels to subscribe (Buzz channel UUIDs, comma-separated)
+BUZZ_CHANNELS=
+
+# Map authors → QM principals (hex or npub)
+#   hex:email;DisplayName
+#   npub1...:email
+#   or JSON: [{"pubkey":"...","principalId":"you@example.com","displayName":"You"}]
+BUZZ_PRINCIPAL_MAP=
+
+# Optional
+BUZZ_BOT_NAME=QM
+BUZZ_MENTION_KEYWORDS=qm,lab-sandbox
+# Per-channel harness/model (channelId:harness or channelId:harness:modelId)
+# Harnesses: pi | opencode | codex | claude | mock
+BUZZ_CHANNEL_RUNTIME=
+# NIP-OA owner-attested auth tag JSON if relay requires it
+# BUZZ_AUTH_TAG=["auth",...]
+BUZZ_ALLOW_UNMAPPED=0
+# BUZZ_DEFAULT_PRINCIPAL=you@example.com
+BUZZ_ALL_MESSAGES=0
+# BUZZ_RECONNECT_MS=5000
+
+# Core harness default (when no [[harness:]] / channel runtime override)
+# HARNESS=pi
+# MODEL=...

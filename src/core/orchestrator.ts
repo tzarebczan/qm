@@ -771,12 +771,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const recalled = recalledSections.join("\n\n");
       const isWeb = input.surface === "web";
       const isSlack = input.surface === "slack";
+      const isBuzz = input.surface === "buzz";
       const surfaceTool = input.surface ?? "slack";
       const botName = input.gatewayContext?.botName?.trim() || undefined;
       const orgName = "this organization";
       let modeName = "mode-fallback";
       if (input.surfaceTools) modeName = "mode-autonomous";
-      else if (!automatedTurn && (conversation.kind === "dm" || isWeb)) modeName = "mode-conversation";
+      else if (!automatedTurn && (conversation.kind === "dm" || isWeb || isBuzz)) modeName = "mode-conversation";
       let frameMd = MODE_FALLBACK_MD;
       if (modeName === "mode-autonomous") frameMd = MODE_AUTONOMOUS_MD;
       else if (modeName === "mode-conversation") frameMd = MODE_CONVERSATION_MD;
@@ -784,10 +785,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (modeName === "mode-autonomous") {
         frameVars = { botName, surfaceTool, slack: isSlack };
       } else if (modeName === "mode-conversation") {
+        let surfaceLabel = "Slack";
+        if (isWeb) surfaceLabel = "the QM web app";
+        else if (isBuzz) surfaceLabel = "Buzz";
         frameVars = {
           userName: actor.displayName?.trim() || "there",
           userEmail: actor.id.includes("@") ? actor.id : undefined,
-          surfaceLabel: isWeb ? "the QM web app" : "Slack",
+          surfaceLabel,
           slack: isSlack,
           web: isWeb,
         };
