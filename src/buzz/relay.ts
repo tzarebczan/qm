@@ -51,15 +51,14 @@ export class BuzzRelayClient {
   private sk: Uint8Array;
   readonly pubkey: string;
   private handlers: Handler;
+  private relayUrl: string;
   private authChallenge: string | null = null;
   private authWaiters: Array<(c: string) => void> = [];
+  private okWaiters: Array<(ok: { id: string; accepted: boolean; message: string }) => void> = [];
   private closed = false;
 
-  constructor(
-    private relayUrl: string,
-    privateKey: string,
-    handlers: Handler = {},
-  ) {
+  constructor(relayUrl: string, privateKey: string, handlers: Handler = {}) {
+    this.relayUrl = relayUrl;
     this.sk = parseBotSecret(privateKey);
     this.pubkey = pubkeyHexFromSecret(this.sk);
     this.handlers = handlers;
@@ -102,6 +101,13 @@ export class BuzzRelayClient {
       for (const w of this.authWaiters.splice(0)) w(msg[1]);
       return;
     }
+    if (type === "OK" && typeof msg[1] === "string") {
+      const accepted = msg[2] === true;
+      const message = typeof msg[3] === "string" ? msg[3] : "";
+      const payload = { id: msg[1], accepted, message };
+      for (const w of this.okWaiters.splice(0)) w(payload);
+      return;
+    }
     if (type === "EVENT" && msg[2] && typeof msg[2] === "object") {
       this.handlers.onEvent?.(msg[2] as NostrEvent);
       return;
@@ -123,6 +129,16 @@ export class BuzzRelayClient {
       this.authWaiters.push((c) => {
         clearTimeout(t);
         resolve(c);
+      });
+    });
+  }
+
+  private waitOk(ms: number): Promise<{ id: string; accepted: boolean; message: string }> {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("timeout waiting for AUTH OK")), ms);
+      this.okWaiters.push((ok) => {
+        clearTimeout(t);
+        resolve(ok);
       });
     });
   }
@@ -150,7 +166,12 @@ export class BuzzRelayClient {
       },
       this.sk,
     );
+    const okP = this.waitOk(15_000);
     this.send(["AUTH", event]);
+    const ok = await okP;
+    if (!ok.accepted) {
+      throw new Error(`buzz NIP-42 AUTH rejected: ${ok.message || "unknown"}`);
+    }
   }
 
   subscribe(subId: string, filter: Record<string, unknown>): void {

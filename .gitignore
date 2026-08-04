@@ -21,3 +21,7 @@ __pycache__/
 docs/master.html
 
 .context/
+
+.env.buzz*
+*.tar.gz
+.tmp-*
