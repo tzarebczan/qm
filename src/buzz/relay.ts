@@ -218,8 +218,39 @@ export class BuzzRelayClient {
   }
 
   get isClosed(): boolean {
-    return this.closed || !this.ws || this.ws.readyState === WSImpl.CLOSED;
+    return this.closed || !this.ws || this.ws.readyState === WSImpl.CLOSED || this.ws.readyState === WSImpl.CLOSING;
   }
+
+  /** True when socket can send (used by reconnect-safe publish). */
+  get isOpen(): boolean {
+    return !!this.ws && this.ws.readyState === WSImpl.OPEN && !this.closed;
+  }
+}
+
+/** Mutable holder so in-flight turns publish on the live socket after reconnect. */
+export type BuzzRelayHolder = { current: BuzzRelayClient | null };
+
+export async function publishViaHolder(
+  holder: BuzzRelayHolder,
+  channelId: string,
+  content: string,
+  replyTo?: string,
+  attempts = 8,
+): Promise<void> {
+  let lastErr: Error | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const relay = holder.current;
+    if (relay?.isOpen) {
+      try {
+        await relay.publishChannelMessage(channelId, content, replyTo);
+        return;
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500 + i * 400));
+  }
+  throw lastErr ?? new Error("buzz relay not connected");
 }
 
 export { generateSecretKey };

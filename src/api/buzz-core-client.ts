@@ -17,6 +17,7 @@ export interface BuzzCoreClient {
 }
 
 const RUN_POLL_MS = 1_000;
+/** Stall only when status/lease make no progress (matches Slack client). */
 const RUN_STALL_MS = 300_000;
 
 export function createBuzzCoreClient(deps: {
@@ -38,9 +39,10 @@ export function createBuzzCoreClient(deps: {
     async waitRun(runId) {
       const waiters = terminalWaiters.get(runId) ?? new Set();
       terminalWaiters.set(runId, waiters);
-      let progress = Date.now();
+      let lastProgressAt = Date.now();
+      let lastMark = "";
       const wake = (): void => {
-        progress = Date.now();
+        lastProgressAt = Date.now();
       };
       waiters.add(wake);
       const unsub = deps.turnStream.subscribe(runId, {
@@ -55,11 +57,39 @@ export function createBuzzCoreClient(deps: {
           } catch {
             run = undefined;
           }
-          if (run && isTerminal(run.status) && run.result) {
-            return run.result as TurnResult;
+          if (run) {
+            if (isTerminal(run.status) && run.result) {
+              return run.result as TurnResult;
+            }
+            if (isTerminal(run.status) && !run.result) {
+              // Terminal without result yet — keep waiting briefly for result fill
+              const mark = `terminal:${run.status}`;
+              if (mark !== lastMark) {
+                lastMark = mark;
+                lastProgressAt = Date.now();
+              }
+            } else {
+              const mark = `${run.status}:${run.attempts}:${run.leaseExpiresAt ?? ""}`;
+              if (mark !== lastMark) {
+                lastMark = mark;
+                lastProgressAt = Date.now();
+              }
+            }
+            if (deps.turnStream.surfacePosted(runId)) wake();
+            const fb = deps.turnStream.firstBlock(runId);
+            if (fb?.closed) wake();
           }
-          if (Date.now() - progress >= RUN_STALL_MS) {
-            throw Object.assign(new Error("run stalled"), { code: "run_stalled" });
+          if (Date.now() - lastProgressAt >= RUN_STALL_MS) {
+            // Last chance: return terminal result if present
+            try {
+              const late = await deps.runs.get(runId);
+              if (late && isTerminal(late.status) && late.result) {
+                return late.result as TurnResult;
+              }
+            } catch {
+              /* ignore */
+            }
+            throw Object.assign(new Error("run stalled"), { code: "run_stalled", runId });
           }
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, RUN_POLL_MS);

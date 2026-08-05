@@ -33,12 +33,29 @@ export function parseBuzzDeliveryTarget(
   return null;
 }
 
-export function rootEventIdFromTags(tags: string[][]): string | undefined {
-  // NIP-10 style: e tags — first "root" marker or first e tag
+/**
+ * Resolve QM session root for a Buzz message.
+ *
+ * Prefer NIP-10 `e` tags with marker "root". If only a "reply" marker exists,
+ * use that event id (one-hop thread). Do **not** fall back to the first bare
+ * `e` tag — that joins unrelated threads when clients omit markers.
+ *
+ * @param eventId this message's id (used when no structured thread tags)
+ */
+export function rootEventIdFromTags(tags: string[][], eventId?: string): string | undefined {
   const eTags = tags.filter((t) => t[0] === "e" && t[1]);
   const root = eTags.find((t) => t[3] === "root" || t[2] === "root");
   if (root?.[1]) return root[1];
-  return eTags[0]?.[1];
+  const reply = eTags.find((t) => t[3] === "reply" || t[2] === "reply");
+  if (reply?.[1]) return reply[1];
+  // Unmarked e tags: ignore for session identity (prevents cross-thread bleed)
+  if (eventId?.trim()) return eventId.trim();
+  return undefined;
+}
+
+/** Session root for turn handling — always returns a concrete id. */
+export function sessionRootEventId(tags: string[][], eventId: string): string {
+  return rootEventIdFromTags(tags, eventId) ?? eventId;
 }
 
 export function channelIdFromTags(tags: string[][]): string | undefined {

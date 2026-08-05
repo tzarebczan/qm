@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buzzPluginConfigFromEnv, harnessOverrideFromText } from "../src/buzz/config.ts";
+import { buzzPluginConfigFromEnv, buzzPluginConfigsFromEnv, harnessOverrideFromText } from "../src/buzz/config.ts";
 import {
   buzzDeliveryTarget,
   buzzThreadRef,
   channelIdFromTags,
   parseBuzzDeliveryTarget,
   rootEventIdFromTags,
+  sessionRootEventId,
 } from "../src/buzz/conversation.ts";
 import { contentMentionsBot, resolveBuzzActor, tagsMentionPubkey } from "../src/buzz/identity.ts";
 
@@ -42,6 +43,46 @@ test("channel and root tags", () => {
   assert.equal(channelIdFromTags(tags), "channel-1");
   assert.equal(rootEventIdFromTags(tags), "rootid");
   assert.equal(tagsMentionPubkey(tags, "pubkey1"), true);
+});
+
+test("session root ignores bare e tags (prevents cross-thread bleed)", () => {
+  const bare = [
+    ["h", "ch"],
+    ["e", "unrelated-parent"],
+  ];
+  assert.equal(sessionRootEventId(bare, "this-event-id"), "this-event-id");
+  const replyOnly = [
+    ["h", "ch"],
+    ["e", "parent-msg", "", "reply"],
+  ];
+  assert.equal(sessionRootEventId(replyOnly, "child-id"), "parent-msg");
+  const withRoot = [
+    ["e", "true-root", "", "root"],
+    ["e", "parent", "", "reply"],
+  ];
+  assert.equal(sessionRootEventId(withRoot, "child"), "true-root");
+});
+
+test("buzzPluginConfigsFromEnv multi-agent JSON", () => {
+  const agents = buzzPluginConfigsFromEnv({
+    BUZZ_RELAY_URL: "wss://x",
+    BUZZ_CHANNELS: "chan-1",
+    BUZZ_AGENTS_JSON: JSON.stringify([
+      { id: "qm", name: "QM", privateKey: "0".repeat(64), defaultHarness: "pi", mentionKeywords: ["qm"] },
+      {
+        id: "qm-grok",
+        name: "QM-Grok",
+        privateKey: "1".repeat(64),
+        defaultHarness: "codex",
+        mentionKeywords: ["qm-grok", "grok"],
+      },
+    ]),
+  });
+  assert.equal(agents.length, 2);
+  assert.equal(agents[0]!.botName, "QM");
+  assert.equal(agents[0]!.defaultHarnessId, "pi");
+  assert.equal(agents[1]!.agentId, "qm-grok");
+  assert.equal(agents[1]!.defaultHarnessId, "codex");
 });
 
 test("principal map resolves email", () => {

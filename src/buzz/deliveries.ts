@@ -5,7 +5,8 @@ import type { BuzzRelayClient } from "./relay.ts";
 /** Recovery poller: post undelivered run results to Buzz channels. */
 export function createBuzzDeliveryPoller(deps: {
   core: BuzzCoreClient;
-  relay: BuzzRelayClient;
+  /** Live relay or thin proxy — must support publishChannelMessage. */
+  relay: Pick<BuzzRelayClient, "publishChannelMessage">;
 }): { start(): void; stop(): void } {
   let timer: NodeJS.Timeout | null = null;
   let inFlight = false;

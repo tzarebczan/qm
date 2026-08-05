@@ -1,19 +1,24 @@
 import type { BuzzCoreClient } from "../api/buzz-core-client.ts";
 import type { BuzzPluginConfig } from "./config.ts";
 import { createBuzzDeliveryPoller } from "./deliveries.ts";
-import { BuzzRelayClient } from "./relay.ts";
+import { BuzzRelayClient, type BuzzRelayHolder } from "./relay.ts";
 import { createBuzzTurnHandler } from "./turn-handler.ts";
 
-export { buzzPluginConfigFromEnv, type BuzzPluginConfig } from "./config.ts";
+export {
+  buzzPluginConfigFromEnv,
+  buzzPluginConfigsFromEnv,
+  type BuzzPluginConfig,
+} from "./config.ts";
 
 export async function startBuzzPlugin(
   cfg: BuzzPluginConfig,
   core: BuzzCoreClient,
 ): Promise<{ stop(): Promise<void> }> {
   let stopped = false;
-  let client: BuzzRelayClient | null = null;
+  const relayHolder: BuzzRelayHolder = { current: null };
   let reconnectTimer: NodeJS.Timeout | null = null;
   let poller: { start(): void; stop(): void } | null = null;
+  const logPrefix = `[buzz-plugin:${cfg.agentId}]`;
 
   const runLoop = async (): Promise<void> => {
     while (!stopped) {
@@ -23,55 +28,66 @@ export async function startBuzzPlugin(
           onEvent: (ev) => {
             if (!handler) return;
             void handler.handleEvent(ev).catch((err) =>
-              console.error("[buzz-plugin] event handler error:", (err as Error).message),
+              console.error(`${logPrefix} event handler error:`, (err as Error).message),
             );
           },
-          onNotice: (msg) => console.log("[buzz-plugin] notice:", msg),
+          onNotice: (msg) => console.log(`${logPrefix} notice:`, msg),
           onClose: (code, reason) => {
-            console.warn(`[buzz-plugin] relay closed (${code}) ${reason}`);
+            console.warn(`${logPrefix} relay closed (${code}) ${reason}`);
           },
         });
-        client = relay;
+        relayHolder.current = relay;
         handler = createBuzzTurnHandler({
           cfg,
           core,
-          relay,
+          relayHolder,
           botPubkey: relay.pubkey,
         });
 
-        console.log(`[buzz-plugin] connecting to ${cfg.relayUrl} as ${relay.pubkey.slice(0, 12)}…`);
+        console.log(`${logPrefix} connecting to ${cfg.relayUrl} as ${relay.pubkey.slice(0, 12)}…`);
         await relay.connect();
         await relay.authenticate(cfg.authTagJson);
         try {
-          await relay.publishProfile(cfg.botName, "QM multiplayer ops agent (Buzz surface)");
+          await relay.publishProfile(
+            cfg.botName,
+            cfg.about ?? "QM multiplayer ops agent (Buzz surface)",
+          );
         } catch (err) {
-          console.warn("[buzz-plugin] profile publish failed (non-fatal):", (err as Error).message);
+          console.warn(`${logPrefix} profile publish failed (non-fatal):`, (err as Error).message);
         }
 
         if (cfg.channelIds.length) {
           for (const channelId of cfg.channelIds) {
-            // NIP-29 channel messages often use h tag; filter by kind + since
-            relay.subscribe(`qm-buzz-${channelId.slice(0, 8)}`, {
+            relay.subscribe(`qm-buzz-${cfg.agentId}-${channelId.slice(0, 8)}`, {
               kinds: [9],
               "#h": [channelId],
               since: Math.floor(Date.now() / 1000) - 5,
             });
-            console.log(`[buzz-plugin] subscribed channel ${channelId}`);
+            console.log(`${logPrefix} subscribed channel ${channelId}`);
           }
         } else {
-          // Broad subscribe — filter in handler (requires relay to allow)
-          relay.subscribe("qm-buzz-all", {
+          relay.subscribe(`qm-buzz-${cfg.agentId}-all`, {
             kinds: [9],
             since: Math.floor(Date.now() / 1000) - 5,
           });
-          console.log("[buzz-plugin] subscribed all kind:9 (set BUZZ_CHANNELS to narrow)");
+          console.log(`${logPrefix} subscribed all kind:9 (set BUZZ_CHANNELS to narrow)`);
         }
 
-        poller = createBuzzDeliveryPoller({ core, relay });
+        poller = createBuzzDeliveryPoller({
+          core,
+          relay: {
+            publishChannelMessage: (channelId, content, replyTo) => {
+              const r = relayHolder.current;
+              if (!r?.isOpen) return Promise.reject(new Error("buzz relay not connected"));
+              return r.publishChannelMessage(channelId, content, replyTo);
+            },
+          } as BuzzRelayClient,
+        });
         poller.start();
-        console.log(`[buzz-plugin] live as @${cfg.botName} (harness follows core / [[harness:…]] overrides)`);
+        console.log(
+          `${logPrefix} live as @${cfg.botName} harness=${cfg.defaultHarnessId ?? "core-default"} (overrides: channel / [[harness:…]])`,
+        );
 
-        // Stay until closed
         await new Promise<void>((resolve) => {
           const prev = relay;
           const check = setInterval(() => {
@@ -83,15 +99,17 @@ export async function startBuzzPlugin(
           check.unref();
         });
       } catch (err) {
-        console.error("[buzz-plugin] session error:", (err as Error).message);
+        console.error(`${logPrefix} session error:`, (err as Error).message);
       } finally {
         poller?.stop();
         poller = null;
-        client?.close();
-        client = null;
+        if (relayHolder.current) {
+          relayHolder.current.close();
+          relayHolder.current = null;
+        }
       }
       if (stopped) break;
-      console.log(`[buzz-plugin] reconnecting in ${cfg.reconnectMs}ms…`);
+      console.log(`${logPrefix} reconnecting in ${cfg.reconnectMs}ms…`);
       await new Promise((r) => setTimeout(r, cfg.reconnectMs));
     }
   };
@@ -103,8 +121,9 @@ export async function startBuzzPlugin(
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       poller?.stop();
-      client?.close();
-      console.log("[buzz-plugin] stopped");
+      relayHolder.current?.close();
+      relayHolder.current = null;
+      console.log(`${logPrefix} stopped`);
     },
   };
 }
