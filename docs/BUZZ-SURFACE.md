@@ -32,7 +32,7 @@ Buzz Desktop DMs are **NIP-29 channel-type DMs** (kind:9 + `#h` = DM UUID, metad
 When `BUZZ_DM` is enabled (default):
 
 1. Subscribe membership `kinds:[44100,44101]` with `#p` = bot pubkey  
-2. On add: SEQ kind:9 for that channel UUID (24h lookback)  
+2. On add: SEQ kind:9 for that channel UUID (short lookback; no history replay)  
 3. Every human message in a DM is a turn (`conversation.kind = "dm"`) — no @mention required  
 4. Replies publish kind:9 on the same DM channel  
 

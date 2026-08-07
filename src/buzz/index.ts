@@ -60,8 +60,9 @@ export async function startBuzzPlugin(
 
         const addDmChannel = (relay: BuzzRelayClient, channelId: string, reason: string): void => {
           if (!channelId || publicChannelIds.has(channelId) || dmChannels.has(channelId)) return;
-          // 24h lookback so historical membership on boot still delivers recent unread DMs.
-          const subId = subscribeKind9(relay, channelId, "dm", 86_400);
+          // Short lookback only: long windows re-fire entire DM history on every reconnect.
+          // Membership history discovers which channels to watch; live kind:9 carries new msgs.
+          const subId = subscribeKind9(relay, channelId, "dm", 30);
           dmChannels.set(channelId, subId);
           console.log(`${logPrefix} DM channel subscribed ${channelId.slice(0, 8)}… (${reason})`);
         };
