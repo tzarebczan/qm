@@ -178,6 +178,15 @@ export class BuzzRelayClient {
     this.send(["REQ", subId, filter]);
   }
 
+  /** NIP-01 CLOSE — drop a live subscription. */
+  closeSubscription(subId: string): void {
+    try {
+      this.send(["CLOSE", subId]);
+    } catch {
+      /* ignore if socket already down */
+    }
+  }
+
   async publish(template: EventTemplate): Promise<NostrEvent> {
     const event = finalizeEvent(template, this.sk);
     this.send(["EVENT", event]);

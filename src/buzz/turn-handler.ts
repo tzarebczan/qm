@@ -114,9 +114,12 @@ export function createBuzzTurnHandler(deps: {
       return;
     }
 
+<<<<<<< HEAD
     // Immediate "seen" ack (Desktop ACP used to do this). Non-fatal if relay rejects.
     void ackSeen(ev.id);
 
+=======
+>>>>>>> d38955f (feat(buzz): DM support via NIP-29 membership channels)
     // Session isolation: root marker > reply marker > DM channel session | this event id
     const rootId = sessionRootForBuzz(ev.tags, ev.id, { isDm, channelId });
     const { cleanText, harnessId: textHarness, modelId: textModel } = harnessOverrideFromText(ev.content.trim());

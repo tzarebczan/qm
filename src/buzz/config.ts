@@ -40,6 +40,12 @@ export interface BuzzPluginConfig {
   reconnectMs: number;
   /** When true, reply to every channel message (noisy; default false) */
   allMessages: boolean;
+  /**
+   * When true (default), discover Buzz DM channels via kind:44100 membership
+   * notifications and reply to every message in those channels without @mention.
+   * Set BUZZ_DM=0 to disable.
+   */
+  dmEnabled: boolean;
   about?: string;
 }
 
@@ -115,6 +121,8 @@ function sharedFromEnv(env: Record<string, string | undefined>) {
     channelRuntime: parseChannelRuntime(env.BUZZ_CHANNEL_RUNTIME),
     reconnectMs: Math.max(1_000, Number(env.BUZZ_RECONNECT_MS) || 5_000),
     allMessages: env.BUZZ_ALL_MESSAGES === "1",
+    // Default on: Buzz Desktop DMs are NIP-29 channels (hidden), not gift-wraps.
+    dmEnabled: env.BUZZ_DM !== "0" && env.BUZZ_DM !== "false",
   };
 }
 

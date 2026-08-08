@@ -22,7 +22,21 @@ BUZZ_CHANNEL_RUNTIME=<ops-uuid>:pi,<other-uuid>:codex
 BUZZ_AUTH_TAG='["auth",...]'   # NIP-OA if required by relay
 BUZZ_ALLOW_UNMAPPED=0
 BUZZ_ALL_MESSAGES=0            # 1 = reply to every message in subscribed channels
+# BUZZ_DM=0                    # default on: discover Buzz DMs (NIP-29 hidden channels via kind:44100)
 ```
+
+## Direct messages (DMs)
+
+Buzz Desktop DMs are **NIP-29 channel-type DMs** (kind:9 + `#h` = DM UUID, metadata kind:39000 with `hidden`), not only NIP-17 gift wraps.
+
+When `BUZZ_DM` is enabled (default):
+
+1. Subscribe membership `kinds:[44100,44101]` with `#p` = bot pubkey  
+2. On add: SEQ kind:9 for that channel UUID (24h lookback)  
+3. Every human message in a DM is a turn (`conversation.kind = "dm"`) — no @mention required  
+4. Replies publish kind:9 on the same DM channel  
+
+Set `BUZZ_DM=0` to disable. Gift-wrap kind:1059 is not handled yet.
 
 ## Harness selection
 
@@ -38,9 +52,10 @@ Surfaces never force a harness unless the user/channel opts in.
 
 1. Connect WebSocket → NIP-42 AUTH → optional kind:0 profile  
 2. Subscribe kind:9 on `BUZZ_CHANNELS`  
-3. On @QM / keywords / p-tag mention → `app.turn({ surface: "buzz", … })`  
-4. Publish reply kind:9 with e-tag reply  
-5. Delivery poller claims `type: "buzz"` for recovery copies  
+3. (DM) Subscribe membership 44100/44101; dynamic kind:9 per DM channel  
+4. Channel: @bot / keywords / p-tag → turn; DM: every message → turn (`kind: "dm"`)  
+5. Publish reply kind:9 with e-tag reply  
+6. Delivery poller claims `type: "buzz"` for recovery copies  
 
 ## Thread refs
 

@@ -24,6 +24,7 @@ BUZZ_CHANNEL_RUNTIME=
 BUZZ_ALLOW_UNMAPPED=0
 # BUZZ_DEFAULT_PRINCIPAL=you@example.com
 BUZZ_ALL_MESSAGES=0
+# BUZZ_DM=1                   # default on; set 0 to disable DM discovery (kind:44100 + kind:9)
 # BUZZ_RECONNECT_MS=5000
 
 # Core harness default (when no [[harness:]] / channel runtime override)
