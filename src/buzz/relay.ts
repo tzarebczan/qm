@@ -54,7 +54,10 @@ export class BuzzRelayClient {
   private relayUrl: string;
   private authChallenge: string | null = null;
   private authWaiters: Array<(c: string) => void> = [];
-  private okWaiters: Array<(ok: { id: string; accepted: boolean; message: string }) => void> = [];
+  private okWaiters: Array<{
+    wantId?: string;
+    resolve: (ok: { id: string; accepted: boolean; message: string }) => void;
+  }> = [];
   private closed = false;
 
   constructor(relayUrl: string, privateKey: string, handlers: Handler = {}) {
@@ -105,7 +108,13 @@ export class BuzzRelayClient {
       const accepted = msg[2] === true;
       const message = typeof msg[3] === "string" ? msg[3] : "";
       const payload = { id: msg[1], accepted, message };
-      for (const w of this.okWaiters.splice(0)) w(payload);
+      // Prefer waiters that asked for this event id; otherwise first anonymous waiter (AUTH).
+      const idx = this.okWaiters.findIndex((w) => w.wantId === payload.id);
+      const pick = idx >= 0 ? idx : this.okWaiters.findIndex((w) => !w.wantId);
+      if (pick >= 0) {
+        const [w] = this.okWaiters.splice(pick, 1);
+        w?.resolve(payload);
+      }
       return;
     }
     if (type === "EVENT" && msg[2] && typeof msg[2] === "object") {
@@ -133,13 +142,27 @@ export class BuzzRelayClient {
     });
   }
 
-  private waitOk(ms: number): Promise<{ id: string; accepted: boolean; message: string }> {
+  private waitOk(
+    ms: number,
+    wantId?: string,
+  ): Promise<{ id: string; accepted: boolean; message: string }> {
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("timeout waiting for AUTH OK")), ms);
-      this.okWaiters.push((ok) => {
+      const entry: {
+        wantId?: string;
+        resolve: (ok: { id: string; accepted: boolean; message: string }) => void;
+      } = {
+        ...(wantId ? { wantId } : {}),
+        resolve: () => {},
+      };
+      const t = setTimeout(() => {
+        this.okWaiters = this.okWaiters.filter((w) => w !== entry);
+        reject(new Error(wantId ? `timeout waiting for EVENT OK ${wantId.slice(0, 12)}` : "timeout waiting for AUTH OK"));
+      }, ms);
+      entry.resolve = (ok) => {
         clearTimeout(t);
         resolve(ok);
-      });
+      };
+      this.okWaiters.push(entry);
     });
   }
 
@@ -187,9 +210,15 @@ export class BuzzRelayClient {
     }
   }
 
-  async publish(template: EventTemplate): Promise<NostrEvent> {
+  async publish(template: EventTemplate, opts?: { waitOkMs?: number }): Promise<NostrEvent> {
     const event = finalizeEvent(template, this.sk);
+    const waitMs = opts?.waitOkMs ?? 15_000;
+    const okP = this.waitOk(waitMs, event.id);
     this.send(["EVENT", event]);
+    const ok = await okP;
+    if (!ok.accepted) {
+      throw new Error(`buzz EVENT rejected: ${ok.message || "unknown"} id=${event.id.slice(0, 12)}`);
+    }
     return event as unknown as NostrEvent;
   }
 
@@ -204,6 +233,22 @@ export class BuzzRelayClient {
       created_at: Math.floor(Date.now() / 1000),
       tags,
       content,
+    });
+  }
+
+  /**
+   * NIP-25 reaction (kind:7). Relay derives channel from the target event's #e.
+   * Used as an immediate "seen / working" ack before the full reply posts.
+   */
+  async publishReaction(targetEventId: string, emoji = "👀"): Promise<NostrEvent> {
+    return this.publish({
+      kind: 7,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["e", targetEventId],
+        ["client", "qm-buzz-surface"],
+      ],
+      content: emoji,
     });
   }
 
@@ -245,19 +290,40 @@ export async function publishViaHolder(
   content: string,
   replyTo?: string,
   attempts = 8,
+): Promise<NostrEvent> {
+  let lastErr: Error | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const relay = holder.current;
+    if (relay?.isOpen) {
+      try {
+        return await relay.publishChannelMessage(channelId, content, replyTo);
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500 + i * 400));
+  }
+  throw lastErr ?? new Error("buzz relay not connected");
+}
+
+export async function reactViaHolder(
+  holder: BuzzRelayHolder,
+  targetEventId: string,
+  emoji = "👀",
+  attempts = 4,
 ): Promise<void> {
   let lastErr: Error | undefined;
   for (let i = 0; i < attempts; i++) {
     const relay = holder.current;
     if (relay?.isOpen) {
       try {
-        await relay.publishChannelMessage(channelId, content, replyTo);
+        await relay.publishReaction(targetEventId, emoji);
         return;
       } catch (err) {
         lastErr = err as Error;
       }
     }
-    await new Promise((r) => setTimeout(r, 500 + i * 400));
+    await new Promise((r) => setTimeout(r, 300 + i * 300));
   }
   throw lastErr ?? new Error("buzz relay not connected");
 }
