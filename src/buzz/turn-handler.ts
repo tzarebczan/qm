@@ -6,20 +6,29 @@ import {
   buzzDeliveryTarget,
   buzzThreadRef,
   channelIdFromTags,
-  sessionRootEventId,
+  sessionRootForBuzz,
 } from "./conversation.ts";
 import { contentMentionsBot, resolveBuzzActor, tagsMentionPubkey } from "./identity.ts";
-import { publishViaHolder, type BuzzRelayHolder, type NostrEvent } from "./relay.ts";
+import { publishViaHolder, reactViaHolder, type BuzzRelayHolder, type NostrEvent } from "./relay.ts";
+import { sanitizeBuzzOutbound } from "./sanitize.ts";
+
+export type BuzzDmRegistry = {
+  /** True when channelId is a discovered DM (membership 44100, not in BUZZ_CHANNELS). */
+  isDmChannel(channelId: string): boolean;
+};
 
 export function createBuzzTurnHandler(deps: {
   cfg: BuzzPluginConfig;
   core: BuzzCoreClient;
   relayHolder: BuzzRelayHolder;
   botPubkey: string;
+  /** Optional DM registry from membership subscriptions. */
+  dmRegistry?: BuzzDmRegistry;
 }) {
   const seen = new Set<string>();
   const MAX_SEEN = 5_000;
   const logPrefix = `[buzz-plugin:${deps.cfg.agentId}]`;
+  const publicChannelIds = new Set(deps.cfg.channelIds);
 
   function remember(id: string): boolean {
     if (seen.has(id)) return false;
@@ -31,10 +40,22 @@ export function createBuzzTurnHandler(deps: {
     return true;
   }
 
-  function shouldHandle(ev: NostrEvent): boolean {
+  function isDmChannel(channelId: string): boolean {
+    if (!deps.cfg.dmEnabled) return false;
+    // Explicit registry from membership is authoritative.
+    if (deps.dmRegistry?.isDmChannel(channelId)) return true;
+    // Fallback: subscribed via empty BUZZ_CHANNELS (all kind:9) or race before registry —
+    // any channel not in the configured public list is treated as DM when DMs are on.
+    if (publicChannelIds.size === 0) return false;
+    return !publicChannelIds.has(channelId);
+  }
+
+  function shouldHandle(ev: NostrEvent, isDm: boolean): boolean {
     if (ev.kind !== 9) return false;
     if (ev.pubkey === deps.botPubkey) return false;
     if (!remember(ev.id)) return false;
+    // DMs: every human message is addressed to the bot (no @mention required).
+    if (isDm) return true;
     if (deps.cfg.allMessages) return true;
     if (tagsMentionPubkey(ev.tags, deps.botPubkey)) return true;
     return contentMentionsBot(deps.cfg, ev.content, deps.botPubkey);
@@ -52,22 +73,38 @@ export function createBuzzTurnHandler(deps: {
     return {};
   }
 
-  async function safePublish(channelId: string, content: string, replyTo?: string): Promise<void> {
+  async function safePublish(channelId: string, content: string, replyTo?: string): Promise<boolean> {
     try {
-      await publishViaHolder(deps.relayHolder, channelId, content, replyTo);
+      const published = await publishViaHolder(deps.relayHolder, channelId, content, replyTo);
+      console.log(
+        `${logPrefix} published kind:9 id=${published.id.slice(0, 12)}… ch=${channelId.slice(0, 8)}… replyTo=${replyTo?.slice(0, 12) ?? "-"}… chars=${content.length}`,
+      );
+      return true;
     } catch (err) {
       console.error(`${logPrefix} publish failed:`, (err as Error).message);
+      return false;
+    }
+  }
+
+  async function ackSeen(targetEventId: string): Promise<void> {
+    try {
+      await reactViaHolder(deps.relayHolder, targetEventId, "👀");
+      console.log(`${logPrefix} ack reaction 👀 on ${targetEventId.slice(0, 12)}…`);
+    } catch (err) {
+      console.warn(`${logPrefix} ack reaction failed:`, (err as Error).message);
     }
   }
 
   async function handleEvent(ev: NostrEvent): Promise<void> {
-    if (!shouldHandle(ev)) return;
-
     const channelId = channelIdFromTags(ev.tags);
-    if (!channelId) {
+    if (ev.kind === 9 && !channelId) {
       console.warn(`${logPrefix} kind:9 without channel tag; ignoring`, ev.id.slice(0, 12));
       return;
     }
+    if (!channelId) return;
+
+    const isDm = isDmChannel(channelId);
+    if (!shouldHandle(ev, isDm)) return;
 
     const actor = resolveBuzzActor(deps.cfg, ev.pubkey);
     if (!actor) {
@@ -77,8 +114,11 @@ export function createBuzzTurnHandler(deps: {
       return;
     }
 
-    // Session isolation: root marker > reply marker > this event id (never bare first-e)
-    const rootId = sessionRootEventId(ev.tags, ev.id);
+    // Immediate "seen" ack (Desktop ACP used to do this). Non-fatal if relay rejects.
+    void ackSeen(ev.id);
+
+    // Session isolation: root marker > reply marker > DM channel session | this event id
+    const rootId = sessionRootForBuzz(ev.tags, ev.id, { isDm, channelId });
     const { cleanText, harnessId: textHarness, modelId: textModel } = harnessOverrideFromText(ev.content.trim());
     if (!cleanText.trim()) return;
 
@@ -97,14 +137,15 @@ export function createBuzzTurnHandler(deps: {
 
     const threadRef = buzzThreadRef(channelId, rootId);
     const deliveryTarget = buzzDeliveryTarget(channelId, ev.id);
+    const conversationKind = isDm ? "dm" : "channel";
 
     const body: BuzzTurnBody = {
       actor,
       conversation: {
-        kind: "channel",
+        kind: conversationKind,
         threadRef,
         channelRef: channelId,
-        channelName: channelId,
+        channelName: isDm ? "dm" : channelId,
         audience: [actor],
       },
       text: cleanText,
@@ -112,7 +153,7 @@ export function createBuzzTurnHandler(deps: {
       liveActor: true,
       origin: { kind: "human", messageTs: ev.id },
       gatewayContext: {
-        location: "a Buzz channel",
+        location: isDm ? "a Buzz direct message" : "a Buzz channel",
         details: {
           channel_id: channelId,
           event_id: ev.id,
@@ -121,14 +162,22 @@ export function createBuzzTurnHandler(deps: {
           author_pubkey: ev.pubkey,
           surface: "buzz",
           agent_id: deps.cfg.agentId,
+          conversation_kind: conversationKind,
         },
         instructions:
-          "You are replying in Buzz (Nostr community chat) as @" +
-          deps.cfg.botName +
-          ". Keep replies concise. Markdown is fine. " +
+          (isDm
+            ? "You are replying in a Buzz direct message as @" +
+              deps.cfg.botName +
+              ". This is a private 1:1 conversation — reply to every message without waiting for an @mention. "
+            : "You are replying in Buzz (Nostr community chat) as @" +
+              deps.cfg.botName +
+              ". ") +
+          "Keep replies concise. Markdown is fine. " +
           "This turn is ONLY for thread_ref=" +
           threadRef +
-          " — do not mix in other Buzz threads or unrelated workstreams unless the user explicitly asks. " +
+          " - do not mix in other Buzz threads or unrelated workstreams unless the user explicitly asks. " +
+          "Use only plain ASCII punctuation (hyphen -, arrows as ->, ellipsis as ...). " +
+          "Do not use em dashes, smart quotes, or special Unicode bullets. " +
           "Users may set harness with [[harness:pi|opencode|codex|claude]].",
         botName: deps.cfg.botName,
       },
@@ -138,7 +187,7 @@ export function createBuzzTurnHandler(deps: {
     };
 
     console.log(
-      `${logPrefix} turn from ${actor.externalId} ch=${channelId.slice(0, 8)}… thread=${rootId.slice(0, 12)}… harness=${harnessId ?? "default"}`,
+      `${logPrefix} turn from ${actor.externalId} ${isDm ? "dm" : "ch"}=${channelId.slice(0, 8)}… thread=${rootId.slice(0, 24)} harness=${harnessId ?? "default"}`,
     );
 
     let result;
@@ -148,15 +197,13 @@ export function createBuzzTurnHandler(deps: {
       if (queued.status === "queued" && queued.runId) {
         runId = queued.runId;
         if (queued.steered) {
-          console.log(`${logPrefix} steered into run ${runId.slice(0, 8)}… (same thread)`);
+          // Another in-flight turn on this thread owns the wait/publish path.
+          // Do NOT ack delivery here — the owner (or delivery poller) must publish.
+          console.log(`${logPrefix} steered into run ${runId.slice(0, 8)}… (same thread; no separate reply)`);
           return;
         }
+        console.log(`${logPrefix} waiting run ${runId.slice(0, 8)}…`);
         result = await deps.core.waitRun(queued.runId);
-        if (result && (result.status === "ok" || result.status === "refused" || result.status === "failed")) {
-          void deps.core.ackRunDelivery(queued.runId).catch((e) =>
-            console.error(`${logPrefix} ack delivery failed:`, (e as Error).message),
-          );
-        }
       } else {
         result = queued;
       }
@@ -185,7 +232,10 @@ export function createBuzzTurnHandler(deps: {
     }
 
     if (!result) return;
-    if (result.status === "silent") return;
+    if (result.status === "silent") {
+      console.log(`${logPrefix} run silent (no channel post) run=${runId?.slice(0, 8) ?? "-"}`);
+      return;
+    }
 
     const replyText =
       result.status === "ok"
@@ -194,7 +244,15 @@ export function createBuzzTurnHandler(deps: {
           ? `Refused: ${result.reason ?? result.refusalKind ?? "policy"}`
           : `Failed: ${result.reason ?? result.status}`;
 
-    await safePublish(channelId, replyText.slice(0, 60_000), ev.id);
+    // Publish first, then ack run delivery key so a failed post can still be recovered by the poller.
+    const ok = await safePublish(channelId, sanitizeBuzzOutbound(replyText).slice(0, 60_000), ev.id);
+    if (ok && runId) {
+      void deps.core.ackRunDelivery(runId).catch((e) =>
+        console.error(`${logPrefix} ack delivery failed:`, (e as Error).message),
+      );
+    } else if (!ok && runId) {
+      console.error(`${logPrefix} left delivery pending for run ${runId.slice(0, 8)}… (publish failed)`);
+    }
   }
 
   return { handleEvent };

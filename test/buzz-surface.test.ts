@@ -141,3 +141,53 @@ test("contentMentionsBot keywords", () => {
 test("buzzPluginConfigFromEnv null without keys", () => {
   assert.equal(buzzPluginConfigFromEnv({}), null);
 });
+
+test("sanitizeBuzzOutbound replaces fancy punctuation", async () => {
+  const { sanitizeBuzzOutbound } = await import("../src/buzz/sanitize.ts");
+  const raw = "Status — demo \u2192 next\u2026 \u201Cquote\u201D \u00B7 bullet";
+  const out = sanitizeBuzzOutbound(raw);
+  assert.equal(out.includes("—"), false);
+  assert.equal(out.includes("\u2192"), false);
+  assert.match(out, /Status - demo/);
+  assert.match(out, /->/);
+  assert.match(out, /\.\.\./);
+});
+
+test("dmEnabled defaults on; BUZZ_DM=0 disables", () => {
+  const on = buzzPluginConfigFromEnv({
+    BUZZ_RELAY_URL: "wss://x",
+    BUZZ_BOT_PRIVATE_KEY: "1".repeat(64),
+  })!;
+  assert.equal(on.dmEnabled, true);
+  const off = buzzPluginConfigFromEnv({
+    BUZZ_RELAY_URL: "wss://x",
+    BUZZ_BOT_PRIVATE_KEY: "1".repeat(64),
+    BUZZ_DM: "0",
+  })!;
+  assert.equal(off.dmEnabled, false);
+});
+
+test("sessionRootForBuzz shares unthreaded DM session per channel", async () => {
+  const { sessionRootForBuzz, membershipChannelIdFromTags, isBuzzMembershipKind } = await import(
+    "../src/buzz/conversation.ts"
+  );
+  const tags = [["h", "dm-uuid-1"]];
+  const a = sessionRootForBuzz(tags, "event-a", { isDm: true, channelId: "dm-uuid-1" });
+  const b = sessionRootForBuzz(tags, "event-b", { isDm: true, channelId: "dm-uuid-1" });
+  assert.equal(a, "dm-session:dm-uuid-1");
+  assert.equal(b, a);
+  const ch = sessionRootForBuzz(tags, "event-c", { isDm: false, channelId: "dm-uuid-1" });
+  assert.equal(ch, "event-c");
+  const threaded = sessionRootForBuzz(
+    [
+      ["h", "dm-uuid-1"],
+      ["e", "root-ev", "", "root"],
+    ],
+    "child",
+    { isDm: true, channelId: "dm-uuid-1" },
+  );
+  assert.equal(threaded, "root-ev");
+  assert.equal(membershipChannelIdFromTags([["p", "pk"], ["h", "chan-x"]]), "chan-x");
+  assert.equal(isBuzzMembershipKind(44100), true);
+  assert.equal(isBuzzMembershipKind(9), false);
+});

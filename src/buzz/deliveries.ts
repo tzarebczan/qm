@@ -1,6 +1,7 @@
 import type { BuzzCoreClient } from "../api/buzz-core-client.ts";
 import { parseBuzzDeliveryTarget } from "./conversation.ts";
 import type { BuzzRelayClient } from "./relay.ts";
+import { sanitizeBuzzOutbound } from "./sanitize.ts";
 
 /** Recovery poller: post undelivered run results to Buzz channels. */
 export function createBuzzDeliveryPoller(deps: {
@@ -23,7 +24,7 @@ export function createBuzzDeliveryPoller(deps: {
             await deps.core.ackDelivery(d.id);
             continue;
           }
-          const text = (d.text ?? "").trim();
+          const text = sanitizeBuzzOutbound((d.text ?? "").trim());
           if (text) {
             await deps.relay.publishChannelMessage(parsed.channelId, text, parsed.replyToEventId);
           }
