@@ -22,6 +22,12 @@ import type { App, AppDeps } from "./app-types.ts";
 
 export function createAmbientHelpers(deps: AppDeps, app: App) {
   function shouldRouteToSpine(input: OrchestratorInput): boolean {
+    // Buzz has no Slack-style surface tool delivery plane. Routing channel turns
+    // through spine wraps them in a wake envelope that tells the model to
+    // `buzz.post`, then forces result status "silent" — so the buzz plugin never
+    // publishes kind:9. Keep DMs and all Buzz turns on conversation mode so
+    // replies go through turn-handler publish (same path that works for DMs).
+    if (input.surface === "buzz") return false;
     const { conversation } = input;
     return conversation.kind !== "dm" && (input.origin.kind === "human" || input.origin.kind === "ambient");
   }
