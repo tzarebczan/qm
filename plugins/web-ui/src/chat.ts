@@ -47,6 +47,7 @@ import {
   makeOpenerStreamFn,
   makeRunResumeStreamFn,
   runApprovalTurn,
+  resolveApprovalApi,
   sharedContextLabel,
   TAIL_TURNS,
   type ApprovalDecision,
@@ -427,19 +428,24 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     ctx.composer.state.error = "";
     drawActiveChat(agent);
     try {
-      await runApprovalTurn(
-        chatState.threadRef,
-        agent,
-        decision,
-        currentTurnOptions,
-        chatState.onWork ?? undefined,
-        undefined,
-        runSlot,
-      );
-    } catch (err) {
-      if (agent === chatState.agent) {
-        ctx.composer.state.error = err instanceof Error ? err.message : "Could not send the approval.";
-        drawActiveChat(agent);
+      // Prefer dedicated approvals API so Buzz/Slack sessions work, not only web: threads.
+      await resolveApprovalApi(decision);
+    } catch {
+      try {
+        await runApprovalTurn(
+          chatState.threadRef,
+          agent,
+          decision,
+          currentTurnOptions,
+          chatState.onWork ?? undefined,
+          undefined,
+          runSlot,
+        );
+      } catch (err) {
+        if (agent === chatState.agent) {
+          ctx.composer.state.error = err instanceof Error ? err.message : "Could not send the approval.";
+          drawActiveChat(agent);
+        }
       }
     } finally {
       chatState.resolvingApprovals.delete(decision.requestId);
@@ -455,9 +461,47 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     }
   }
 
+  async function approveFromReadOnly(decision: ApprovalDecision): Promise<void> {
+    if (chatState.resolvingApprovals.size > 0) return;
+    const ro = readOnlyView;
+    if (!ro) return;
+    chatState.resolvingApprovals.add(decision.requestId);
+    readonlyRedraw?.();
+    try {
+      await resolveApprovalApi(decision);
+      try {
+        await refreshSessions({ silent: true });
+      } catch {
+        void 0;
+      }
+      // Reload the same session so the transcript / approval panel updates.
+      const s = ro.session;
+      const page = await fetchTranscript(s.id, { tailTurns: TAIL_TURNS }).catch(() => null);
+      if (!page || readOnlyView?.id !== ro.id) return;
+      const messages = entriesToMessages(page.entries ?? [], transcriptModel());
+      let pending: PendingApproval[] = [];
+      try {
+        const r = await api<{ approvals: PendingApproval[] }>(
+          `/api/sessions/${encodeURIComponent(s.id)}/approvals`,
+        );
+        pending = r.approvals ?? [];
+        attachPendingApprovals(messages, pending, transcriptModel());
+      } catch {
+        void 0;
+      }
+      mountReadOnly(s, messages, page.earlierEntries ?? 0, page.entries?.[0]?.seq ?? null, pending);
+    } catch (err) {
+      ctx.composer.state.error = err instanceof Error ? err.message : "Could not send the approval.";
+      readonlyRedraw?.();
+    } finally {
+      chatState.resolvingApprovals.delete(decision.requestId);
+    }
+  }
+
   function resolveCommandApproval(decision: ApprovalDecision): void {
     const agent = chatState.agent;
     if (agent) void approveCommand(agent, decision);
+    else if (readOnlyView) void approveFromReadOnly(decision);
   }
 
   function activePendingApprovals(): PendingApproval[] {
@@ -622,11 +666,69 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     container.replaceChildren(host);
   }
 
+  function readOnlyApprovalPanel(approvals: PendingApproval[]): TemplateResult {
+    const busy = chatState.resolvingApprovals.size > 0;
+    const decide = (decision: ApprovalDecision): void => {
+      if (!busy) void approveFromReadOnly(decision);
+    };
+    return html`<div class="composer-approval-panel readonly-approval-panel" role="group" aria-label="Command approval">
+      ${approvals.map(
+        (a) =>
+          html`<div class="composer-approval">
+            <div class="composer-approval-copy">${approvalSummaryView(a, true)}</div>
+            <div class="approval-actions">
+              <button
+                class="approval-btn deny"
+                type="button"
+                ?disabled=${busy}
+                @click=${() => decide({ requestId: a.requestId, approved: false })}
+              >
+                Deny
+              </button>
+              <button
+                class="approval-btn"
+                type="button"
+                ?disabled=${busy}
+                @click=${() => decide({ requestId: a.requestId, approved: true, scope: "once" })}
+              >
+                Allow once
+              </button>
+              ${
+                a.grantModes?.session === false
+                  ? nothing
+                  : html`<button
+                      class="approval-btn primary"
+                      type="button"
+                      ?disabled=${busy}
+                      @click=${() => decide({ requestId: a.requestId, approved: true, scope: "session" })}
+                    >
+                      Allow for session
+                    </button>`
+              }
+              ${
+                a.grantModes?.always === false
+                  ? nothing
+                  : html`<button
+                      class="approval-btn"
+                      type="button"
+                      ?disabled=${busy}
+                      @click=${() => decide({ requestId: a.requestId, approved: true, scope: "always" })}
+                    >
+                      Allow always
+                    </button>`
+              }
+            </div>
+          </div>`,
+      )}
+    </div>`;
+  }
+
   function mountReadOnly(
     s: CoreSession,
     messages: ReturnType<typeof entriesToMessages>,
     earlierCount = 0,
     anchorSeq: number | null = null,
+    pendingApprovals: PendingApproval[] = [],
   ): void {
     const container = ctx.claimContainer();
     if (!container) return;
@@ -636,7 +738,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     clearLiveWork();
     chatState.host = null;
     ctx.composer.resetComposer();
-    chatState.threadRef = null;
+    chatState.threadRef = s.threadRef;
     chatState.sessionId = s.id;
     chatState.scopeId = s.scopeId;
     syncLocation();
@@ -644,14 +746,15 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
     resetBackgroundPanel();
     const host = document.createElement("div");
     host.className = "custom-chat readonly-chat";
+    const surface = surfaceOf(s);
     const draw = () =>
       render(
         html`
           <div class="custom-chat-shell">
-            ${chatHeader(groupDmTitle(s), surfaceOf(s), true)}
+            ${chatHeader(groupDmTitle(s), surface, true)}
             <div class="readonly-banner">
               ${
-                surfaceOf(s) === "slack"
+                surface === "slack"
                   ? html`This conversation lives in Slack. Replies happen
                     there.${
                       sessionSlackUrl(s)
@@ -664,9 +767,17 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                           >`
                         : nothing
                     }`
-                  : "This conversation is read-only here."
+                  : surface === "buzz"
+                    ? "This conversation lives on Buzz. Chat replies happen there — but you can approve paused commands here."
+                    : "This conversation is read-only here."
               }
             </div>
+            ${pendingApprovals.length ? readOnlyApprovalPanel(pendingApprovals) : nothing}
+            ${
+              ctx.composer.state.error
+                ? html`<div class="composer-error" role="alert">${ctx.composer.state.error}</div>`
+                : nothing
+            }
             ${backgroundActivityStrip()}
             <section class="chat-scroll readonly-scroll">
               <div class="message-stack">
@@ -694,6 +805,7 @@ export function createChatSurface(ctx: ConvCtx): ChatSurface {
                                 [...entriesToMessages(page.entries ?? [], transcriptModel()), ...messages],
                                 remaining,
                                 remaining > 0 ? (page.entries?.[0]?.seq ?? null) : null,
+                                pendingApprovals,
                               );
                               requestAnimationFrame(() => {
                                 const scrollerNow = container?.querySelector<HTMLElement>(".chat-scroll");

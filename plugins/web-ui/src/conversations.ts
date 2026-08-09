@@ -4,6 +4,7 @@ import { densityTierFor, type DensityTier } from "./density";
 import { subscribeDeliveries } from "./core-bridge";
 import { applySessionState } from "./session-list";
 import { refreshSessions, renderList, sessionsState } from "./sessions";
+import { renderSidebarTop } from "./shell";
 import { appState } from "./shell-state";
 import type { Conversation, ConvCtx, ConvHost } from "./conv-types";
 
@@ -74,6 +75,7 @@ export function ensureDeliveryStream(): void {
       if (matched) {
         sessionsState.list = list;
         renderList();
+        renderSidebarTop();
       } else {
         void refreshSessions({ silent: true });
       }

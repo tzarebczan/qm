@@ -1159,6 +1159,7 @@ export async function refreshSessions(
     if (seq === sessionRefreshSeq) {
       sessionsLoading = false;
       renderList();
+      renderSidebarTop();
     }
   }
 }
@@ -1199,9 +1200,10 @@ export async function openSessionInto(
   const fetchEntries = (): Promise<TranscriptPage | null> =>
     fetchTranscript(s.id, { tailTurns: TAIL_TURNS }).catch(() => null);
   const continuable = isContinuable(s, appState.me?.user ?? "");
+  // Always load pending approvals — Buzz/Slack sessions are read-only for chat but still approvable.
   const [entriesRes, approvalsRes] = await Promise.all([
     entriesPrefetch ? entriesPrefetch.then((r) => r ?? fetchEntries()) : fetchEntries(),
-    continuable
+    s.id
       ? api<{ approvals: PendingApproval[] }>(`/api/sessions/${encodeURIComponent(s.id)}/approvals`).catch(() => null)
       : Promise.resolve(null),
   ]);
@@ -1221,12 +1223,14 @@ export async function openSessionInto(
   const messages = entriesToMessages(entriesRes.entries ?? [], transcriptModel());
   const earlier = entriesRes.earlierEntries ?? 0;
   const anchorSeq = entriesRes.entries?.[0]?.seq ?? null;
+  const pendingApprovals = approvalsRes?.approvals ?? [];
   if (continuable) {
-    attachPendingApprovals(messages, approvalsRes?.approvals ?? [], transcriptModel());
+    attachPendingApprovals(messages, pendingApprovals, transcriptModel());
     conv.mountContinuable(s.threadRef, s.id, s.scopeId, messages, s.channelName ?? null);
     conv.setTranscriptWindow(anchorSeq, earlier);
   } else {
-    conv.mountReadOnly(s, messages, earlier, anchorSeq);
+    attachPendingApprovals(messages, pendingApprovals, transcriptModel());
+    conv.mountReadOnly(s, messages, earlier, anchorSeq, pendingApprovals);
   }
   renderList();
 }

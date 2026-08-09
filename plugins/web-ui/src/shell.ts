@@ -482,14 +482,23 @@ export function mountShell(): void {
 
 export function renderSidebarTop(): void {
   if (!appState.topEl) return;
-  const navRow = (v: View, glyph: IconNode, label: string) =>
+  const awaitingSessions = sessionsState.list.filter((s) => s.awaitingInput && !s.archived);
+  const awaitingCount = awaitingSessions.length;
+  const openFirstAwaiting = (): void => {
+    const target = awaitingSessions[0];
+    if (!target) return;
+    closeSidebarOnNarrowView();
+    void openSession(target);
+  };
+  const navRow = (v: View, glyph: IconNode, label: string, badge?: number) =>
     html`<button
       class="navrow ${appState.currentView === v ? "active" : ""}"
       type="button"
       data-view=${v}
-      title=${label}
+      title=${badge ? `${label} — ${badge} waiting for approval` : label}
     >
-      ${icon(glyph, 17)}<span>${label}</span>
+      ${icon(glyph, 17)}<span>${label}</span
+      >${badge ? html`<span class="nav-badge" aria-label="${badge} awaiting approval">${badge}</span>` : nothing}
     </button>`;
   const navGroup = (id: string, title: string, open: boolean, toggle: () => void, rows: TemplateResult) => html`
     <button
@@ -509,6 +518,21 @@ export function renderSidebarTop(): void {
   `;
   render(
     html`
+      ${
+        awaitingCount
+          ? html`<button
+              class="approval-home-banner"
+              type="button"
+              title="Open the conversation waiting for approval"
+              @click=${openFirstAwaiting}
+            >
+              <span class="approval-home-dot" aria-hidden="true"></span>
+              <span
+                >${awaitingCount} approval${awaitingCount === 1 ? "" : "s"} waiting — click to open</span
+              >
+            </button>`
+          : nothing
+      }
       <button
         class="new-chat"
         title=${splitState.active ? "New session" : "New chat"}
@@ -526,7 +550,8 @@ export function renderSidebarTop(): void {
           navWorkspaceOpen,
           toggleNavWorkspace,
           html`
-            ${navRow("contexts", ICON.contexts, "Projects")} ${navRow("chats", ICON.chats, "Chats")}
+            ${navRow("contexts", ICON.contexts, "Projects")}
+            ${navRow("chats", ICON.chats, "Chats", awaitingCount || undefined)}
             ${navRow("files", ICON.files, "Files")} ${navRow("crons", ICON.crons, "Crons")}
             ${navRow("keychain", ICON.keychain, "Keychain")} ${navRow("deploys", ICON.deploys, "Apps")}
             ${navRow("memory", ICON.memory, "Memory")} ${navRow("skills", ICON.skills, "Skills")}

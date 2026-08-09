@@ -209,6 +209,7 @@ import { createMemoryRunActivityStore, type RunActivityStore } from "./runs/run-
 import { createPostgresRunActivityStore } from "./runs/postgres-run-activity-store.ts";
 import { createApp, type App } from "./api/app.ts";
 import { createSlackCoreClient, type SlackCoreClient } from "./api/slack-core-client.ts";
+import { createBuzzCoreClient, type BuzzCoreClient } from "./api/buzz-core-client.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -359,6 +360,7 @@ export interface BuiltApp {
   channelPolicy: ChannelPolicyStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
+  buzzCore: BuzzCoreClient;
 }
 
 export function buildApp(
@@ -1103,6 +1105,12 @@ export function buildApp(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
+  const buzzCore = createBuzzCoreClient({
+    app,
+    deliveries,
+    runs,
+    turnStream,
+  });
   runs.onTerminal((run) => {
     void runs
       .activeForThread(run.sessionId)
@@ -1424,5 +1432,6 @@ export function buildApp(
     channelPolicy,
     skillSyncEngine,
     slackCore,
+    buzzCore,
   };
 }

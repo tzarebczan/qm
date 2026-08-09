@@ -1417,7 +1417,9 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const threadRef =
         typeof record.request?.conversation?.threadRef === "string" ? record.request.conversation.threadRef : "";
       const actor = typeof record.request?.actor?.externalId === "string" ? record.request.actor.externalId : "";
-      if (!threadRef.startsWith("web:") || actor !== user || !record.request) {
+      // Actor must match the signed-in user. Surface may be web, buzz, slack, etc. —
+      // non-web sessions are read-only in the UI but still approvable here.
+      if (!actor || actor !== user || !record.request || !threadRef) {
         return json(res, 404, { error: "not_found" });
       }
       if (!threadRef.startsWith(`web:${user}:`)) {
@@ -1432,6 +1434,7 @@ const routeRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
 
       const approval = { requestId, approved, ...(scope ? { scope } : {}) };
+      // Replay the original turn request (any surface) with the approval decision attached.
       return postTurnAndMint(res, { ...record.request, approval }, user, threadRef);
     }
 

@@ -4,7 +4,7 @@ import { compileSafeRegex } from "../util/safe-regex.ts";
 
 const ORG_FLOOR_RULES: CommandRule[] = [
   {
-    pattern: "\\brm\\b[^\\n]*(?:-[a-zA-Z]*r|--recursive)",
+    pattern: "(?:^|[;|&\\n])\\s*rm\\b(?:\\s+-[^\\s;|&]+)*\\s+-[a-zA-Z]*r\\b|\\brm\\b[^\\n;|&]*--recursive",
     decision: "require_approval",
     reason: "recursive delete",
   },

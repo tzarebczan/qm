@@ -540,6 +540,17 @@ export async function runApprovalTurn(
   if (outcome.stopReason === "error") throw new Error(outcome.errorMessage || "Could not send the approval.");
 }
 
+/** Approve/deny a pending command for any surface (web, buzz, slack) via the dedicated approvals API. */
+export async function resolveApprovalApi(decision: ApprovalDecision): Promise<void> {
+  await api(`/api/approvals/${encodeURIComponent(decision.requestId)}`, {
+    method: "POST",
+    body: JSON.stringify({
+      approved: decision.approved,
+      ...(decision.scope ? { scope: decision.scope } : {}),
+    }),
+  });
+}
+
 export function makeOpenerStreamFn(
   threadRef: string,
   agent: Agent,

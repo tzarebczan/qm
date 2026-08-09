@@ -1,0 +1,446 @@
+/**
+ * Minimal NIP-01/29/42 Buzz relay client for QM surface.
+ * Uses nostr-tools for keys/signing; global WebSocket for transport.
+ */
+import { finalizeEvent, generateSecretKey, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
+
+export type NostrEvent = {
+  id: string;
+  pubkey: string;
+  created_at: number;
+  kind: number;
+  tags: string[][];
+  content: string;
+  sig: string;
+};
+
+const WSImpl: typeof globalThis.WebSocket = globalThis.WebSocket;
+
+export function parseBotSecret(raw: string): Uint8Array {
+  const s = raw.trim();
+  if (s.startsWith("nsec")) {
+    const decoded = nip19.decode(s);
+    if (decoded.type !== "nsec") throw new Error("BUZZ_BOT_PRIVATE_KEY nsec decode failed");
+    return decoded.data as Uint8Array;
+  }
+  if (/^[0-9a-f]{64}$/i.test(s)) {
+    return Uint8Array.from(Buffer.from(s, "hex"));
+  }
+  throw new Error("BUZZ_BOT_PRIVATE_KEY must be nsec or 64-char hex");
+}
+
+export function pubkeyHexFromSecret(sk: Uint8Array): string {
+  return getPublicKey(sk);
+}
+
+export function normalizeRelayWsUrl(url: string): string {
+  const u = url.trim().replace(/\/$/, "");
+  if (u.startsWith("https://")) return `wss://${u.slice("https://".length)}`;
+  if (u.startsWith("http://")) return `ws://${u.slice("http://".length)}`;
+  return u;
+}
+
+type Handler = {
+  onEvent?: (ev: NostrEvent) => void;
+  onNotice?: (msg: string) => void;
+  onClose?: (code: number, reason: string) => void;
+};
+
+export class BuzzRelayClient {
+  private ws: WebSocket | null = null;
+  private sk: Uint8Array;
+  readonly pubkey: string;
+  private handlers: Handler;
+  private relayUrl: string;
+  private authChallenge: string | null = null;
+  private authWaiters: Array<(c: string) => void> = [];
+  private okWaiters: Array<{
+    wantId?: string;
+    resolve: (ok: { id: string; accepted: boolean; message: string }) => void;
+  }> = [];
+  private closed = false;
+
+  constructor(relayUrl: string, privateKey: string, handlers: Handler = {}) {
+    this.relayUrl = relayUrl;
+    this.sk = parseBotSecret(privateKey);
+    this.pubkey = pubkeyHexFromSecret(this.sk);
+    this.handlers = handlers;
+  }
+
+  async connect(): Promise<void> {
+    if (!WSImpl) throw new Error("WebSocket is not available in this runtime");
+    const url = normalizeRelayWsUrl(this.relayUrl);
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WSImpl(url);
+      this.ws = ws;
+      const timer = setTimeout(() => reject(new Error("buzz relay connect timeout")), 20_000);
+      ws.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("buzz relay websocket error"));
+      });
+      ws.addEventListener("message", (ev) => this.onMessage(String((ev as MessageEvent).data)));
+      ws.addEventListener("close", (ev) => {
+        const c = ev as CloseEvent;
+        this.handlers.onClose?.(c.code, c.reason);
+      });
+    });
+  }
+
+  private onMessage(raw: string): void {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(msg) || msg.length < 1) return;
+    const type = msg[0];
+    if (type === "AUTH" && typeof msg[1] === "string") {
+      this.authChallenge = msg[1];
+      for (const w of this.authWaiters.splice(0)) w(msg[1]);
+      return;
+    }
+    if (type === "OK" && typeof msg[1] === "string") {
+      const accepted = msg[2] === true;
+      const message = typeof msg[3] === "string" ? msg[3] : "";
+      const payload = { id: msg[1], accepted, message };
+      // Prefer waiters that asked for this event id; otherwise first anonymous waiter (AUTH).
+      const idx = this.okWaiters.findIndex((w) => w.wantId === payload.id);
+      const pick = idx >= 0 ? idx : this.okWaiters.findIndex((w) => !w.wantId);
+      if (pick >= 0) {
+        const [w] = this.okWaiters.splice(pick, 1);
+        w?.resolve(payload);
+      }
+      return;
+    }
+    if (type === "EVENT" && msg[2] && typeof msg[2] === "object") {
+      this.handlers.onEvent?.(msg[2] as NostrEvent);
+      return;
+    }
+    if (type === "NOTICE" && typeof msg[1] === "string") {
+      this.handlers.onNotice?.(msg[1]);
+    }
+  }
+
+  private send(payload: unknown): void {
+    if (!this.ws || this.ws.readyState !== WSImpl.OPEN) throw new Error("buzz relay not connected");
+    this.ws.send(JSON.stringify(payload));
+  }
+
+  private waitChallenge(ms: number): Promise<string> {
+    if (this.authChallenge) return Promise.resolve(this.authChallenge);
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("timeout waiting for AUTH challenge")), ms);
+      this.authWaiters.push((c) => {
+        clearTimeout(t);
+        resolve(c);
+      });
+    });
+  }
+
+  private waitOk(
+    ms: number,
+    wantId?: string,
+  ): Promise<{ id: string; accepted: boolean; message: string }> {
+    return new Promise((resolve, reject) => {
+      const entry: {
+        wantId?: string;
+        resolve: (ok: { id: string; accepted: boolean; message: string }) => void;
+      } = {
+        ...(wantId ? { wantId } : {}),
+        resolve: () => {},
+      };
+      const t = setTimeout(() => {
+        this.okWaiters = this.okWaiters.filter((w) => w !== entry);
+        reject(new Error(wantId ? `timeout waiting for EVENT OK ${wantId.slice(0, 12)}` : "timeout waiting for AUTH OK"));
+      }, ms);
+      entry.resolve = (ok) => {
+        clearTimeout(t);
+        resolve(ok);
+      };
+      this.okWaiters.push(entry);
+    });
+  }
+
+  async authenticate(authTagJson?: string): Promise<void> {
+    const challenge = await this.waitChallenge(15_000);
+    const tags: string[][] = [
+      ["relay", normalizeRelayWsUrl(this.relayUrl)],
+      ["challenge", challenge],
+    ];
+    if (authTagJson) {
+      try {
+        const parsed = JSON.parse(authTagJson) as string[];
+        if (Array.isArray(parsed) && parsed[0] === "auth") tags.push(parsed);
+      } catch {
+        /* ignore */
+      }
+    }
+    const event = finalizeEvent(
+      {
+        kind: 22242,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content: "",
+      },
+      this.sk,
+    );
+    const okP = this.waitOk(15_000);
+    this.send(["AUTH", event]);
+    const ok = await okP;
+    if (!ok.accepted) {
+      throw new Error(`buzz NIP-42 AUTH rejected: ${ok.message || "unknown"}`);
+    }
+  }
+
+  subscribe(subId: string, filter: Record<string, unknown>): void {
+    this.send(["REQ", subId, filter]);
+  }
+
+  /** NIP-01 CLOSE — drop a live subscription. */
+  closeSubscription(subId: string): void {
+    try {
+      this.send(["CLOSE", subId]);
+    } catch {
+      /* ignore if socket already down */
+    }
+  }
+
+  async publish(template: EventTemplate, opts?: { waitOkMs?: number }): Promise<NostrEvent> {
+    const event = finalizeEvent(template, this.sk);
+    const waitMs = opts?.waitOkMs ?? 15_000;
+    const okP = this.waitOk(waitMs, event.id);
+    this.send(["EVENT", event]);
+    const ok = await okP;
+    if (!ok.accepted) {
+      throw new Error(`buzz EVENT rejected: ${ok.message || "unknown"} id=${event.id.slice(0, 12)}`);
+    }
+    return event as unknown as NostrEvent;
+  }
+
+  /**
+   * Publish kind:9. For thread replies, Buzz requires NIP-10 ancestry:
+   * - reply to root: single e-tag with marker "reply" (parent == root)
+   * - nested reply: e root + e reply; root must match parent's thread root
+   *   (only tagging the parent as "reply" is rejected: root tag does not match
+   *   thread ancestry — the relay treats parent as root, which is wrong).
+   *
+   * On ancestry rejection with an explicit root, retry once as reply-only
+   * (parent treated as root). That recovers when the parent is actually
+   * top-level and our root guess was wrong. Nested parents still need a
+   * correct root — callers should pass nip10RootForReplyTo(parent.tags).
+   */
+  async publishChannelMessage(
+    channelId: string,
+    content: string,
+    replyTo?: string,
+    rootId?: string,
+    pTags?: string[],
+    clientTag = "qm-buzz-surface",
+  ): Promise<NostrEvent> {
+    const buildTags = (parent?: string, root?: string): string[][] => {
+      const tags: string[][] = [
+        ["h", channelId],
+        ["client", clientTag],
+      ];
+      if (!parent) {
+        /* top-level */
+      } else {
+        const r = (root?.trim() || parent).toLowerCase();
+        const p = parent.trim().toLowerCase();
+        if (r !== p && /^[0-9a-f]{64}$/i.test(r)) {
+          tags.push(["e", r, "", "root"]);
+          tags.push(["e", p, "", "reply"]);
+        } else {
+          tags.push(["e", p, "", "reply"]);
+        }
+      }
+      for (const pk of pTags ?? []) {
+        if (pk && /^[0-9a-f]{64}$/i.test(pk)) tags.push(["p", pk.toLowerCase()]);
+      }
+      return tags;
+    };
+
+    const tryPublish = async (tags: string[][]): Promise<NostrEvent> =>
+      this.publish({
+        kind: 9,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content,
+      });
+
+    const primary = buildTags(replyTo, rootId);
+    try {
+      return await tryPublish(primary);
+    } catch (err) {
+      const msg = (err as Error).message || "";
+      const hadDistinctRoot =
+        !!replyTo &&
+        !!rootId?.trim() &&
+        rootId.trim().toLowerCase() !== replyTo.trim().toLowerCase();
+      if (hadDistinctRoot && /root tag does not match thread ancestry/i.test(msg)) {
+        // Parent may be top-level; retry reply-only.
+        return await tryPublish(buildTags(replyTo, replyTo));
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * NIP-25 reaction (kind:7). Relay derives channel from the target event's #e.
+   * Used as an immediate "seen / working" ack before the full reply posts.
+   */
+  async publishReaction(targetEventId: string, emoji = "👀"): Promise<NostrEvent> {
+    return this.publish({
+      kind: 7,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["e", targetEventId],
+        ["client", "qm-buzz-surface"],
+      ],
+      content: emoji,
+    });
+  }
+
+  /**
+   * Delete own message. Buzz honors NIP-09 kind:5 (self-authored only) and
+   * also uses kind:9005 for room-facing deletes. We publish kind:5 with #h so
+   * channel subscriptions see it (Buzz convention).
+   */
+  async publishDeleteMessage(
+    channelId: string,
+    targetEventId: string,
+    reason = "dismissed",
+  ): Promise<NostrEvent> {
+    const id = targetEventId.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) {
+      throw new Error("publishDeleteMessage: invalid event id");
+    }
+    // Prefer NIP-09; include k=9 so clients know the deleted kind.
+    return this.publish({
+      kind: 5,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["h", channelId],
+        ["e", id],
+        ["k", "9"],
+        ["client", "qm-buzz-scout"],
+      ],
+      content: reason,
+    });
+  }
+
+  async publishProfile(name: string, about?: string): Promise<NostrEvent> {
+    return this.publish({
+      kind: 0,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify({ name, display_name: name, ...(about ? { about } : {}) }),
+    });
+  }
+
+  close(): void {
+    this.closed = true;
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    this.ws = null;
+  }
+
+  get isClosed(): boolean {
+    return this.closed || !this.ws || this.ws.readyState === WSImpl.CLOSED || this.ws.readyState === WSImpl.CLOSING;
+  }
+
+  /** True when socket can send (used by reconnect-safe publish). */
+  get isOpen(): boolean {
+    return !!this.ws && this.ws.readyState === WSImpl.OPEN && !this.closed;
+  }
+}
+
+/** Mutable holder so in-flight turns publish on the live socket after reconnect. */
+export type BuzzRelayHolder = { current: BuzzRelayClient | null };
+
+export async function publishViaHolder(
+  holder: BuzzRelayHolder,
+  channelId: string,
+  content: string,
+  replyTo?: string,
+  rootId?: string,
+  attempts = 8,
+  pTags?: string[],
+  clientTag = "qm-buzz-surface",
+): Promise<NostrEvent> {
+  let lastErr: Error | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const relay = holder.current;
+    if (relay?.isOpen) {
+      try {
+        return await relay.publishChannelMessage(
+          channelId,
+          content,
+          replyTo,
+          rootId,
+          pTags,
+          clientTag,
+        );
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500 + i * 400));
+  }
+  throw lastErr ?? new Error("buzz relay not connected");
+}
+
+export async function reactViaHolder(
+  holder: BuzzRelayHolder,
+  targetEventId: string,
+  emoji = "👀",
+  attempts = 4,
+): Promise<void> {
+  let lastErr: Error | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const relay = holder.current;
+    if (relay?.isOpen) {
+      try {
+        await relay.publishReaction(targetEventId, emoji);
+        return;
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 300 + i * 300));
+  }
+  throw lastErr ?? new Error("buzz relay not connected");
+}
+
+export async function deleteMessageViaHolder(
+  holder: BuzzRelayHolder,
+  channelId: string,
+  targetEventId: string,
+  reason = "dismissed",
+  attempts = 4,
+): Promise<void> {
+  let lastErr: Error | undefined;
+  for (let i = 0; i < attempts; i++) {
+    const relay = holder.current;
+    if (relay?.isOpen) {
+      try {
+        await relay.publishDeleteMessage(channelId, targetEventId, reason);
+        return;
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 300 + i * 300));
+  }
+  throw lastErr ?? new Error("buzz relay not connected");
+}
+
+export { generateSecretKey };

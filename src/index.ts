@@ -6,6 +6,7 @@ import { defaultModelForHarness, modelProviderAvailabilityFor } from "./model/pi
 import { effectiveEgressEnforcement } from "./sandbox/sandbox.ts";
 import { slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
 import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
+import { buzzPluginConfigsFromEnv, startBuzzPlugin } from "./buzz/index.ts";
 
 const config = loadConfig();
 
@@ -131,12 +132,49 @@ const slackRuntime = createSlackRuntimeReconciler({
 });
 slackRuntime.start();
 
+/** Multi-agent Buzz bots: one reconciler per agent config (same QM brain, distinct Nostr ids / harness). */
+const buzzRuntimes: Array<{ stop(): Promise<void> }> = [];
+{
+  const agents = buzzPluginConfigsFromEnv(process.env);
+  if (agents.length) {
+    console.log(`[qm] Buzz surface: ${agents.length} agent(s) — ${agents.map((a) => a.botName).join(", ")}`);
+    for (const agentCfg of agents) {
+      const runtime = createSlackRuntimeReconciler({
+        load: async () => {
+          const latest = buzzPluginConfigsFromEnv(process.env).find((a) => a.agentId === agentCfg.agentId);
+          if (!latest) return null;
+          const version = [
+            latest.relayUrl,
+            latest.channelIds.join(","),
+            latest.botName,
+            latest.defaultHarnessId ?? "",
+            latest.authTagJson ? "auth" : "",
+          ].join("|");
+          return { version, config: latest };
+        },
+        startPlugin: (desired) => startBuzzPlugin(desired, built.buzzCore),
+        onError: (error) =>
+          console.error(`[qm] buzz plugin ${agentCfg.agentId} reconciliation failed: ${errMessage(error)}`),
+      });
+      runtime.start();
+      buzzRuntimes.push(runtime);
+    }
+  } else if (process.env.BUZZ_RELAY_URL || process.env.BUZZ_BOT_PRIVATE_KEY || process.env.BUZZ_AGENTS_JSON) {
+    console.warn(
+      "[qm] Buzz surface partial env — need BUZZ_RELAY_URL + (BUZZ_BOT_PRIVATE_KEY or BUZZ_AGENTS_JSON)",
+    );
+  }
+}
+
 let shuttingDown = false;
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[qm] ${signal} received, shutting down`);
   void slackRuntime.stop().catch((e: unknown) => console.error("[qm] slack plugin stop failed:", errMessage(e)));
+  for (const rt of buzzRuntimes) {
+    void rt.stop().catch((e: unknown) => console.error("[qm] buzz plugin stop failed:", errMessage(e)));
+  }
   built.scheduler.stop();
   built.deploymentLayerRefresh.stop();
   server.close();

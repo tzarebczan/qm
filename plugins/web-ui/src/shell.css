@@ -230,6 +230,53 @@ body.resizing-sidebar {
   opacity: 0.85;
 }
 
+.nav-badge {
+  margin-left: auto;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--danger, #c44);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.25rem;
+  text-align: center;
+}
+.layout.sidebar-closed #sidebar-top .nav-badge {
+  display: none;
+}
+.approval-home-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  margin: 0 0 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--danger, #c44) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger, #c44) 12%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.approval-home-banner:hover {
+  background: color-mix(in srgb, var(--danger, #c44) 18%, transparent);
+}
+.approval-home-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--danger, #c44);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger, #c44) 25%, transparent);
+  flex: 0 0 auto;
+}
+.readonly-approval-panel {
+  margin: 0 0 0.75rem;
+}
 .nav {
   display: flex;
   flex-direction: column;
